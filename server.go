@@ -19,85 +19,35 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
-	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"os/signal"
 	"path"
-	"path/filepath"
 	"time"
 
-	"github.com/ezbastion/ezb_worker/Middleware"
-	"github.com/ezbastion/ezb_worker/models"
-	"github.com/ezbastion/ezb_worker/models/exec"
-	"github.com/ezbastion/ezb_worker/models/healthCheck"
-	"github.com/ezbastion/ezb_worker/models/wkslog"
+	"github.com/ezbastion/ezb_lib/logmanager"
+	"github.com/ezbastion/ezb_wks/Middleware"
+	"github.com/ezbastion/ezb_wks/models/exec"
+	"github.com/ezbastion/ezb_wks/models/healthCheck"
+	"github.com/ezbastion/ezb_wks/models/tasks"
+	"github.com/ezbastion/ezb_wks/models/wkslog"
+	"github.com/ezbastion/ezb_wks/setup"
 
 	"github.com/gin-gonic/contrib/ginrus"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
-	"github.com/tkanos/gonfig"
 )
 
-var conf models.Configuration
-var exPath string
-
 func mainGin(serverchan *chan bool) {
-	ex, _ := os.Executable()
-	exPath = filepath.Dir(ex)
 
-	err := gonfig.GetConf(path.Join(exPath, "/conf/config.json"), &conf)
+	conf, err := setup.CheckConfig()
 	if err != nil {
 		panic(err)
 	}
 
-	/* log */
-	outlog := true
-	gin.DisableConsoleColor()
-	log.SetFormatter(&log.JSONFormatter{})
-	switch conf.LogLevel {
-	case "debug":
-		log.SetLevel(log.DebugLevel)
-		break
-	case "info":
-		log.SetLevel(log.InfoLevel)
-		break
-	case "warning":
-		log.SetLevel(log.WarnLevel)
-		break
-	case "error":
-		log.SetLevel(log.ErrorLevel)
-		break
-	case "critical":
-		log.SetLevel(log.FatalLevel)
-		break
-	default:
-		outlog = false
-	}
-	if outlog {
-		if _, err := os.Stat(path.Join(exPath, "log")); os.IsNotExist(err) {
-			err = os.MkdirAll(path.Join(exPath, "log"), 0600)
-			if err != nil {
-				log.Println(err)
-			}
-		}
-
-		ti := time.NewTicker(1 * time.Minute)
-		defer ti.Stop()
-		go func() {
-			for range ti.C {
-				t := time.Now().UTC()
-				l := fmt.Sprintf("log/ezb_wks-%d%d.log", t.Year(), t.YearDay())
-				f, _ := os.OpenFile(path.Join(exPath, l), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-				defer f.Close()
-				log.SetOutput(io.MultiWriter(f))
-			}
-		}()
-	}
-	/* log */
-
+	logmanager.SetLogLevel(conf.Logger.LogLevel, exPath, path.Join(exPath, "log/ezb_wks.log"), conf.Logger.MaxSize, conf.Logger.MaxBackups, conf.Logger.MaxAge)
+	log.Debug("start main")
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 	r.Use(ginrus.Ginrus(log.StandardLogger(), time.RFC3339, true))
@@ -107,6 +57,7 @@ func mainGin(serverchan *chan bool) {
 	healthCheck.Routes(r)
 	wkslog.Routes(r)
 	exec.Routes(r)
+	tasks.Routes(r)
 	caCert, err := ioutil.ReadFile(path.Join(exPath, conf.CaCert))
 	if err != nil {
 		log.Fatal(err)
@@ -129,19 +80,19 @@ func mainGin(serverchan *chan bool) {
 
 	go func() {
 		if err := srv.ListenAndServeTLS(path.Join(exPath, conf.PublicCert), path.Join(exPath, conf.PrivateKey)); err != nil {
-			log.Printf("listen: %s\n", err)
+			log.Debug("listen: %s\n", err)
 		}
 	}()
 
 	quit := make(chan os.Signal)
 	signal.Notify(quit, os.Interrupt)
 	<-quit
-	log.Println("Shutdown Server ...")
+	log.Debug("Shutdown Server ...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatal("Server Shutdown:", err)
 	}
-	log.Println("Server exiting")
+	log.Debug("Server exiting")
 }
